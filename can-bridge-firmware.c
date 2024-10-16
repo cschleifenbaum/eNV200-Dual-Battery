@@ -75,9 +75,9 @@ volatile    uint8_t        seen_1da                = 0; //for 2011 battery swap
 volatile    uint8_t        seconds_without_1f2        = 0; //bugfix: 0x603/69C/etc. isn't sent upon charge start on the gen1 Leaf, so we need to trigger our reset on a simple absence of messages
 volatile    uint8_t        main_battery_temp        = 0; 
 
-const uint8_t vehicle_can_bus = 2;
-const uint8_t primary_battery_can_bus = 1;
-const uint8_t secondary_battery_can_bus = 3;
+#define vehicle_can_bus 1
+#define primary_battery_can_bus 2
+#define secondary_battery_can_bus 3
 
 volatile    uint16_t    startup_counter_1DB        = 0;
 volatile     uint8_t        startup_counter_39X     = 0;
@@ -127,19 +127,39 @@ static        can_frame_t        AZE0_390_message    = {.can_id = 0x390, .can_dl
 static        can_frame_t        AZE0_393_message    = {.can_id = 0x393, .can_dlc = 8, .data = {0x00,0x10,0x00,0x00,0x20,0x00,0x00,0x02}}; // Sending removes P3196
 #endif
 
-static Battery_1db_message primary_battery_1db       = {.can_id = 0x0, .can_dlc = 8, .LB_Current = 0, .LB_Discharge_Power_Status = 0, .LB_Failsafe_Status = 0, .LB_Full_CHARGE_flag = 0, .LB_INTER_LOCK = 1, .LB_MainRelayOn_flag = 1, .LB_Relay_Cut_Request = 0, .LB_Total_Voltage = 0, .LB_Usable_SOC = 0, .LB_Voltage_Latch_Flag = 0 };
-static Battery_1db_message secondary_battery_1db     = {.can_id = 0x0, .can_dlc = 8, .LB_Current = 0, .LB_Discharge_Power_Status = 0, .LB_Failsafe_Status = 0, .LB_Full_CHARGE_flag = 0, .LB_INTER_LOCK = 1, .LB_MainRelayOn_flag = 1, .LB_Relay_Cut_Request = 0, .LB_Total_Voltage = 0, .LB_Usable_SOC = 0, .LB_Voltage_Latch_Flag = 0 };
+static uint16_t primary_battery_current = 0;
+static uint16_t secondary_battery_current = 0;
+static uint8_t primary_battery_lb_relay_cut_request = 0;
+static uint8_t secondary_battery_lb_relay_cut_request = 0;
+static uint8_t primary_battery_lb_failsafe_status = 0;
+static uint8_t secondary_battery_lb_failsafe_status = 0;
+static uint8_t primary_battery_lb_main_relay_on_flag = 0;
+static uint8_t secondary_battery_lb_main_relay_on_flag = 1;
+static uint8_t primary_battery_lb_full_charge_flag = 0;
+static uint8_t secondary_battery_lb_full_charge_flag = 0;
+static uint8_t primary_battery_lb_inter_lock = 0;
+static uint8_t secondary_battery_lb_inter_lock = 1;
+static uint8_t primary_battery_lb_discharge_power_status = 0;
+static uint8_t secondary_battery_lb_discharge_power_status = 0;
 
-static Battery_1dc_message primary_battery_1dc       = {.can_id = 0x0, .can_dlc = 8, .LB_Charge_Power_Limit = 1023, .LB_Discharge_Power_Limit = 1023, .LB_MAX_POWER_FOR_CHARGER = 1023 };
-static Battery_1dc_message secondary_battery_1dc     = {.can_id = 0x0, .can_dlc = 8, .LB_Charge_Power_Limit = 1023, .LB_Discharge_Power_Limit = 1023, .LB_MAX_POWER_FOR_CHARGER = 1023 };
+static uint16_t primary_battery_discharge_power_limit = 0;
+static uint16_t secondary_battery_discharge_power_limit = 1023;
+static uint16_t primary_battery_charge_power_limit = 0;
+static uint16_t secondary_battery_charge_power_limit = 1023;
+static uint16_t primary_battery_max_power_for_charger = 0;
+static uint16_t secondary_battery_max_power_for_charger = 1023;
+static uint8_t primary_battery_charge_power_status = 0;
+static uint8_t secondary_battery_charge_power_status = 0;
 
-static Battery_5bc_message primary_battery_5bc       = {.can_id = 0x0, .can_dlc = 8, .LB_Capacity_Deterioration_Rate = 0, .LB_MaxGIDS = 0, .LB_Output_Power_Limit_Reason = 0, .LB_Remain_Cap_Segment_Swit_Flag = 0, .LB_Remain_Capacity_GIDS = 0, .LB_Remain_Charge_Time = 0, .LB_Remain_Charge_Time_Condition = 0, .LB_Remaining_Capacity_Segments = 0, .LB_Temperature_Segment_For_Dash = 0 };
-static Battery_5bc_message secondary_battery_5bc     = {.can_id = 0x0, .can_dlc = 8, .LB_Capacity_Deterioration_Rate = 0, .LB_MaxGIDS = 0, .LB_Output_Power_Limit_Reason = 0, .LB_Remain_Cap_Segment_Swit_Flag = 0, .LB_Remain_Capacity_GIDS = 500, .LB_Remain_Charge_Time = 0, .LB_Remain_Charge_Time_Condition = 0, .LB_Remaining_Capacity_Segments = 0, .LB_Temperature_Segment_For_Dash = 0 };
-static Battery_5bc_message primary_battery_5bc_max   = {.can_id = 0x0, .can_dlc = 8, .LB_Capacity_Deterioration_Rate = 0, .LB_MaxGIDS = 0, .LB_Output_Power_Limit_Reason = 0, .LB_Remain_Cap_Segment_Swit_Flag = 0, .LB_Remain_Capacity_GIDS = 0, .LB_Remain_Charge_Time = 0, .LB_Remain_Charge_Time_Condition = 0, .LB_Remaining_Capacity_Segments = 0, .LB_Temperature_Segment_For_Dash = 0 };
-static Battery_5bc_message secondary_battery_5bc_max = {.can_id = 0x0, .can_dlc = 8, .LB_Capacity_Deterioration_Rate = 0, .LB_MaxGIDS = 1, .LB_Output_Power_Limit_Reason = 0, .LB_Remain_Cap_Segment_Swit_Flag = 0, .LB_Remain_Capacity_GIDS = 500, .LB_Remain_Charge_Time = 0, .LB_Remain_Charge_Time_Condition = 0, .LB_Remaining_Capacity_Segments = 0, .LB_Temperature_Segment_For_Dash = 0 };
+static uint16_t primary_battery_gids = 0;
+static uint16_t secondary_battery_gids = 502;
+static uint16_t primary_battery_max_gids = 0;
+static uint16_t secondary_battery_max_gids = 502;
 
-static Battery_59e_message primary_battery_59e       = {.can_id = 0x0, .can_dlc = 8, .LB_Full_Capacity_for_QC = 0, .LB_Remain_Capacity_for_QC = 0 };
-static Battery_59e_message secondary_battery_59e     = {.can_id = 0x0, .can_dlc = 8, .LB_Full_Capacity_for_QC = 0, .LB_Remain_Capacity_for_QC = 0 };
+static uint16_t primary_battery_lb_full_capacity_for_qc = 0;
+static uint16_t secondary_battery_lb_full_capacity_for_qc = 0;
+static uint16_t primary_battery_lb_remain_capacity_for_qc = 0;
+static uint16_t secondary_battery_lb_remain_capacity_for_qc = 0;
 
 
 void hw_init(void){
@@ -306,84 +326,144 @@ void can_handler(uint8_t can_bus){
             can_read_rx_buf(MCP_RX_0, &frame, can_bus);
             can_bit_modify(MCP_REG_CANINTF, MCP_RX0IF, 0x00, can_bus);
         }
+
+        if (can_bus != vehicle_can_bus) {
+            uint32_t can_id = frame.can_id;
+            if (can_bus == primary_battery_can_bus)
+                frame.can_id = 0x100 + can_id;
+            else if (can_bus == secondary_battery_can_bus)
+                frame.can_id = 0x200 + can_id;
+            send_can(vehicle_can_bus, frame);
+            frame.can_id = can_id;
+        }
         
         switch(frame.can_id){
             
             case 0x1dc: {
-                Battery_1dc_message* message = (Battery_1dc_message*)&frame;
+                uint16_t LB_Discharge_Power_Limit =  (frame.data[0] << 2) + ((frame.data[1] & 0xc0) >> 6);
+                uint16_t LB_Charge_Power_Limit = ((frame.data[1] & 0x3f) << 4) + ((frame.data[2] & 0xf0) >> 4);
+                uint16_t LB_MAX_POWER_FOR_CHARGER = ((frame.data[2] & 0x0f) << 6) + ((frame.data[3] & 0xfc) >> 2);
+                uint8_t LB_Charge_Power_Status = frame.data[3] & 0x03;
 
-                if (can_bus == primary_battery_can_bus)
-                    primary_battery_1dc = *message;
-                else if (can_bus == secondary_battery_can_bus)
-                    secondary_battery_1dc = *message;
+                if (can_bus == primary_battery_can_bus) {
+                    primary_battery_discharge_power_limit = LB_Discharge_Power_Limit;
+                    primary_battery_charge_power_limit = LB_Charge_Power_Limit;
+                    primary_battery_max_power_for_charger = LB_MAX_POWER_FOR_CHARGER;
+                    primary_battery_charge_power_status = LB_Charge_Power_Status;
+                }
+                else if (can_bus == secondary_battery_can_bus) {
+                    secondary_battery_discharge_power_limit = LB_Discharge_Power_Limit;
+                    secondary_battery_charge_power_limit = LB_Charge_Power_Limit;
+                    secondary_battery_max_power_for_charger = LB_MAX_POWER_FOR_CHARGER;
+                    secondary_battery_charge_power_status = LB_Charge_Power_Status;
+                }
 
                 // Now set the minimum for each max power rating
-                message->LB_Discharge_Power_Limit = MIN(primary_battery_1dc.LB_Discharge_Power_Limit, secondary_battery_1dc.LB_Discharge_Power_Limit);
-                message->LB_Charge_Power_Limit = MIN(primary_battery_1dc.LB_Charge_Power_Limit, secondary_battery_1dc.LB_Charge_Power_Limit);
-                message->LB_MAX_POWER_FOR_CHARGER = MIN(primary_battery_1dc.LB_MAX_POWER_FOR_CHARGER, secondary_battery_1dc.LB_MAX_POWER_FOR_CHARGER);
+                LB_Discharge_Power_Limit = MIN(primary_battery_discharge_power_limit, secondary_battery_discharge_power_limit);
+                LB_Charge_Power_Limit = MIN(primary_battery_charge_power_limit, secondary_battery_charge_power_limit);
+                LB_MAX_POWER_FOR_CHARGER = MIN(primary_battery_max_power_for_charger, secondary_battery_max_power_for_charger);
+                LB_Charge_Power_Status = primary_battery_charge_power_status | secondary_battery_charge_power_status;
+
+                frame.data[0] = LB_Discharge_Power_Limit >> 2;
+                frame.data[1] = ((LB_Discharge_Power_Limit & 0x03) << 6) | (LB_Charge_Power_Limit >> 4);
+                frame.data[2] = ((LB_Charge_Power_Limit & 0x0f) << 4) | (LB_MAX_POWER_FOR_CHARGER >> 6);
+                frame.data[3] = ((LB_MAX_POWER_FOR_CHARGER & 0x3f) << 2) | LB_Charge_Power_Status;
                 calc_crc8(&frame);
             }
             break;
 
             case 0x1db: {
-                Battery_1db_message* message = (Battery_1db_message*)&frame;
+                uint16_t LB_Current = (frame.data[0] << 3) | ((frame.data[1] & 0xe0) >> 5);
 
-                if (can_bus == primary_battery_can_bus)
-                    primary_battery_1db = *message;
-                else if (can_bus == secondary_battery_can_bus)
-                    secondary_battery_1db = *message;
+                uint8_t LB_Relay_Cut_Request = (frame.data[1] & 0x18) >> 3;
+                uint8_t LB_Failsafe_status = (frame.data[1] & 0x07);
+                uint8_t LB_MainRelayOn_flag = (frame.data[3] & 0x20) >> 5;
+                uint8_t LB_Full_CHARGE_flag = (frame.data[3] & 0x10) >> 4;
+                uint8_t LB_INTER_LOCK = (frame.data[3] & 0x08) >> 3;
+                uint8_t LB_Discharge_Power_Status = (frame.data[3] & 0x06) >> 1;
+
+                if (can_bus == primary_battery_can_bus) {
+                    primary_battery_current = LB_Current;
+                    primary_battery_lb_relay_cut_request = LB_Relay_Cut_Request;
+                    primary_battery_lb_failsafe_status = LB_Failsafe_status;
+                    primary_battery_lb_main_relay_on_flag = LB_MainRelayOn_flag;
+                    primary_battery_lb_full_charge_flag = LB_Full_CHARGE_flag;
+                    primary_battery_lb_inter_lock = LB_INTER_LOCK;
+                    primary_battery_lb_discharge_power_status = LB_Discharge_Power_Status;
+                }
+                else if (can_bus == secondary_battery_can_bus) {
+                    secondary_battery_current = LB_Current;
+                    secondary_battery_lb_relay_cut_request = LB_Relay_Cut_Request;
+                    secondary_battery_lb_failsafe_status = LB_Failsafe_status;
+                    secondary_battery_lb_main_relay_on_flag = LB_MainRelayOn_flag;
+                    secondary_battery_lb_full_charge_flag = LB_Full_CHARGE_flag;
+                    secondary_battery_lb_inter_lock = LB_INTER_LOCK;
+                    secondary_battery_lb_discharge_power_status = LB_Discharge_Power_Status;
+                }
 
                 // Add the current
-                message->LB_Current = primary_battery_1db.LB_Current + secondary_battery_1db.LB_Current;
+                LB_Current = primary_battery_current + secondary_battery_current;
+
                 // and merge the flags
-                message->LB_Relay_Cut_Request = primary_battery_1db.LB_Relay_Cut_Request | secondary_battery_1db.LB_Relay_Cut_Request;
-                message->LB_Failsafe_Status = primary_battery_1db.LB_Failsafe_Status | secondary_battery_1db.LB_Failsafe_Status;
-                message->LB_MainRelayOn_flag = primary_battery_1db.LB_MainRelayOn_flag & secondary_battery_1db.LB_MainRelayOn_flag;
-                message->LB_Full_CHARGE_flag = primary_battery_1db.LB_Full_CHARGE_flag | secondary_battery_1db.LB_Full_CHARGE_flag;
-                message->LB_INTER_LOCK = primary_battery_1db.LB_INTER_LOCK & secondary_battery_1db.LB_INTER_LOCK;
-                message->LB_Discharge_Power_Status = primary_battery_1db.LB_Discharge_Power_Status | secondary_battery_1db.LB_Discharge_Power_Status;
+                LB_Relay_Cut_Request = primary_battery_lb_relay_cut_request | secondary_battery_lb_relay_cut_request;
+                LB_Failsafe_status = primary_battery_lb_failsafe_status | secondary_battery_lb_failsafe_status;
+                LB_MainRelayOn_flag = primary_battery_lb_main_relay_on_flag & secondary_battery_lb_main_relay_on_flag;
+                LB_Full_CHARGE_flag = primary_battery_lb_full_charge_flag | secondary_battery_lb_full_charge_flag;
+                LB_INTER_LOCK = primary_battery_lb_inter_lock & secondary_battery_lb_inter_lock;
+                LB_Discharge_Power_Status = primary_battery_lb_discharge_power_status | secondary_battery_lb_discharge_power_status;
+
+
+                frame.data[0] = (LB_Current & 0x7f8) >> 3;
+                frame.data[1] = ((LB_Current & 0x07) << 5) | (LB_Relay_Cut_Request << 3) | LB_Failsafe_status;
+                frame.data[3] = (frame.data[3] & 0xc1) | (LB_MainRelayOn_flag << 5) | (LB_Full_CHARGE_flag << 4) | (LB_INTER_LOCK << 3) | (LB_Discharge_Power_Status << 1);
                 calc_crc8(&frame);
             }
             break;
 
             case 0x5bc: {
-                Battery_5bc_message* message = (Battery_5bc_message*)&frame;
-
-                if (message->LB_MaxGIDS == 0) {
+                const bool max_gids = (frame.data[5] & 0x10) != 0;
+                uint16_t gids = (frame.data[0] << 2) + ((frame.data[1] & 0xc0) >> 6);
+                if (max_gids) {
                     if (can_bus == primary_battery_can_bus)
-                        primary_battery_5bc = *message;
+                        primary_battery_max_gids = gids;
                     else if (can_bus == secondary_battery_can_bus)
-                        secondary_battery_5bc = *message;
+                        secondary_battery_max_gids = gids;
                 }
                 else {
                     if (can_bus == primary_battery_can_bus)
-                    primary_battery_5bc_max = *message;
+                        primary_battery_gids = gids;
                     else if (can_bus == secondary_battery_can_bus)
-                    secondary_battery_5bc_max = *message;
+                        secondary_battery_gids = gids;
                 }
 
                 // Now add the remaining GIDS
-                if (message->LB_MaxGIDS == 0) {
-                    message->LB_Remain_Capacity_GIDS = primary_battery_5bc.LB_Remain_Capacity_GIDS + secondary_battery_5bc.LB_Remain_Capacity_GIDS;
-                }
-                else {
-                    message->LB_Remain_Capacity_GIDS = primary_battery_5bc_max.LB_Remain_Capacity_GIDS + secondary_battery_5bc_max.LB_Remain_Capacity_GIDS;
-                }
+                gids = max_gids ? (primary_battery_max_gids + secondary_battery_max_gids) : (primary_battery_gids + secondary_battery_gids);
+
+                frame.data[0] = gids >> 2;
+                frame.data[1] = (gids << 6) & 0xc0;
             }
             break;
 
             case 0x59e: {
-                // QC capacity message
-                Battery_59e_message* message = (Battery_59e_message*)&frame;
+                uint16_t LB_Full_Capacity_for_QC = ((frame.data[2] & 0x1f) << 4) + ((frame.data[3] & 0xf0) >> 4);
+                uint16_t LB_Remain_Capacity_for_QC = ((frame.data[3] & 0x0f) << 5) + ((frame.data[4] & 0xf8) >> 3);
 
-                if (can_bus == primary_battery_can_bus)
-                    primary_battery_59e = *message;
-                else if (can_bus == secondary_battery_can_bus)
-                    secondary_battery_59e = *message;
+                if (can_bus == primary_battery_can_bus) {
+                    primary_battery_lb_full_capacity_for_qc = LB_Full_Capacity_for_QC;
+                    primary_battery_lb_remain_capacity_for_qc = LB_Remain_Capacity_for_QC;
+                }
+                else if (can_bus == secondary_battery_can_bus) {
+                    secondary_battery_lb_full_capacity_for_qc = LB_Full_Capacity_for_QC;
+                    secondary_battery_lb_remain_capacity_for_qc = LB_Remain_Capacity_for_QC;
+                }
 
                 // Now add the capacity values
-                message->LB_Full_Capacity_for_QC = primary_battery_59e.LB_Full_Capacity_for_QC + secondary_battery_59e.LB_Full_Capacity_for_QC;
-                message->LB_Remain_Capacity_for_QC = primary_battery_59e.LB_Remain_Capacity_for_QC + secondary_battery_59e.LB_Remain_Capacity_for_QC;
+                LB_Full_Capacity_for_QC = primary_battery_lb_full_capacity_for_qc + secondary_battery_lb_full_capacity_for_qc;
+                LB_Remain_Capacity_for_QC = secondary_battery_lb_remain_capacity_for_qc + secondary_battery_lb_remain_capacity_for_qc;
+
+                frame.data[2] = (frame.data[2] & 0xe0) | ((LB_Full_Capacity_for_QC & 0x1f0) >> 4);
+                frame.data[3] = ((LB_Full_Capacity_for_QC & 0x00f) << 4) | ((LB_Remain_Capacity_for_QC & 0x1e0) >> 5);
+                frame.data[4] = ((LB_Remain_Capacity_for_QC & 0x01f) << 3) | (frame.data[4] & 0x07);
                 calc_crc8(&frame);
             }
             break;
@@ -1029,12 +1109,17 @@ void can_handler(uint8_t can_bus){
             }
             if(!blocked){
                 switch (can_bus) {
-                    case 2: //vehicle_can_bus
+                    case vehicle_can_bus:
                         send_can(primary_battery_can_bus, frame);
                         send_can(secondary_battery_can_bus, frame);
                         break;
-                    case 1: //primary_battery_can_bus:
-                        send_can(vehicle_can_bus, frame);
+                    case primary_battery_can_bus:
+                        if (frame.can_id != 0x7bb)
+                            send_can(vehicle_can_bus, frame);
+                        break;
+                    case secondary_battery_can_bus:
+                        if (frame.can_id == 0x7bb)
+                            send_can(vehicle_can_bus, frame);
                         break;
                     default:
                         break;
