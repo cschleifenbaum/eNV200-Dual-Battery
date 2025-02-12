@@ -14,7 +14,6 @@
 #include "sp_driver.h"
 #include "mcp25xx.h"
 #include "user_defines.h"
-#include "nissan_can_structs.h"
 #include "helper_functions.h"
 
 //function prototypes

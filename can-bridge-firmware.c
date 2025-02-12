@@ -1,31 +1,5 @@
 #include "can-bridge-firmware.h"
 
-#define MY_BATTERY_24KWH    0
-#define MY_BATTERY_30KWH    1
-#define MY_BATTERY_40KWH    2
-#define MY_BATTERY_62KWH    3
-
-volatile uint8_t My_Battery = MY_BATTERY_24KWH; //Startup in 24kWh mode, autodetect actual battery type later on
-
-#define MY_LEAF_2011        0       // Nissan Leaf ZE0 2010-2013 (light interior)
-#define MY_LEAF_2014        1       // Nissan Leaf AZE0 2013-2017 (dark interior, old exterior style, 24/30kWh battery)
-
-volatile uint8_t My_Leaf  = 1;            // Startup in AZE0 mode, switches to ZE0 if it detects older generation LEAF
-
-#define MINPERCENTAGE 50 //Adjust this value to tune what realSOC% will display as 0% on the dash
-#define MAXPERCENTAGE 950 //Adjust this value to tune what realSOC% will display as 100% on the dash
-
-#define DISABLE_REGEN_IN_DRIVE
-
-// Charge timer minutes lookup values
-#define time_100_with_200V_in_minutes 430
-#define time_80_with_200V_in_minutes 340
-#define time_100_with_100V_in_minutes 700
-#define time_80_with_100V_in_minutes 560
-#define time_100_with_QC_in_minutes 60
-#define time_80_with_66kW_in_minutes 150
-#define time_100_with_66kW_in_minutes 190
-
 //Because the MCP25625 transmit buffers seem to be able to corrupt messages (see errata), we're implementing
 //our own buffering. This is an array of frames-to-be-sent, FIFO. Messages are appended to buffer_end++ as they
 //come in and handled according to buffer_pos until buffer_pos == buffer_end, at which point both pointers reset
@@ -42,90 +16,14 @@ can_frame_t tx3_buffer[5];
 uint8_t        tx3_buffer_pos        = 0;
 uint8_t        tx3_buffer_end        = 0;
 
-//Lookup table battery temperature,    offset -40C        0    1   2   3  4    5   6   7   8   9  10  11  12
-uint8_t        temp_lut[13]                        = {25, 28, 31, 34, 37, 50, 63, 76, 80, 82, 85, 87, 90};
-
-//charging variables
-volatile    uint8_t        charging_state            = 0;
-volatile    uint8_t        max_charge_80_requested    = 0;
-volatile    uint8_t        starting_up                = 0;
-
-//other variables
-#define LB_MIN_SOC 0
-#define LB_MAX_SOC 1000
-volatile    uint16_t    GIDS                     = 0; 
-volatile    uint16_t    MaxGIDS                    = 0;
 volatile    uint8_t        can_busy                = 0;
-volatile    uint8_t        battery_soc                = 0;
-volatile    int16_t        dash_soc                = 0;
-volatile    uint16_t    battery_soc_pptt        = 0;
-
-volatile    uint8_t        swap_idx                = 0;
-volatile    uint8_t        swap_5c0_idx            = 0;
-volatile    uint8_t        VCM_WakeUpSleepCommand    = 0;
-volatile    uint8_t        Byte2_50B                = 0;
-volatile    uint8_t        ALU_question            = 0;
-volatile    uint8_t        cmr_idx                    = QUICK_CHARGE;
-
-volatile    uint8_t        CANMASK                    = 0;
-volatile    uint8_t        skip_5bc                = 1; //for 2011 battery swap, skip 4 messages
-volatile    uint8_t        alternate_5bc            = 0; //for 2011 battery swap
-volatile    uint16_t    current_capacity_wh        = 0; //for 2011 battery swap
-volatile    uint8_t        seen_1da                = 0; //for 2011 battery swap 
-volatile    uint8_t        seconds_without_1f2        = 0; //bugfix: 0x603/69C/etc. isn't sent upon charge start on the gen1 Leaf, so we need to trigger our reset on a simple absence of messages
-volatile    uint8_t        main_battery_temp        = 0; 
 
 #define vehicle_can_bus 1
 #define primary_battery_can_bus 2
 #define secondary_battery_can_bus 3
 
-volatile    uint16_t    startup_counter_1DB        = 0;
-volatile     uint8_t        startup_counter_39X     = 0;
 //timer variables
 volatile    uint16_t    sec_timer            = 1;    //actually the same as ms_timer but counts down from 1000
-
-#ifdef DISABLE_REGEN_IN_DRIVE
-
-#define FADE_OUT_CAP_AFTER_SETTING_REGEN 20
-static volatile uint8_t current_11A_shifter_state = 0;
-static volatile uint8_t previous_11A_shifter_state = 0;
-static volatile uint8_t disable_regen_toggle = 0;
-static volatile uint8_t eco_active = 0;
-static volatile uint8_t timeToSetCapacityDisplay = 0;
-static volatile uint8_t SetCapacityDisplay = 0;
-#endif /* DISABLE_REGEN_IN_DRIVE */
-
-//bits                                                            10                    10                    4                8                7            1                3    (2 space)        1                    5                        13
-volatile    Leaf_2011_5BC_message swap_5bc_remaining    = {.LB_CAPR = 0x12C, .LB_FULLCAP = 0x32, .LB_CAPSEG = 0, .LB_AVET = 50, .LB_SOH = 99, .LB_CAPSW = 0, .LB_RLIMIT = 0, .LB_CAPBALCOMP = 1, .LB_RCHGTCON = 0b01001, .LB_RCHGTIM = 0};
-volatile    Leaf_2011_5BC_message swap_5bc_full            = {.LB_CAPR = 0x12C, .LB_FULLCAP = 0x32, .LB_CAPSEG = 12, .LB_AVET = 50, .LB_SOH = 99, .LB_CAPSW = 1, .LB_RLIMIT = 0, .LB_CAPBALCOMP = 1, .LB_RCHGTCON = 0b01001, .LB_RCHGTIM = 0};
-volatile    Leaf_2011_5BC_message leaf_40kwh_5bc;
-
-volatile    Leaf_2011_5C0_message swap_5c0_max            = {.LB_HIS_DATA_SW = 1, .LB_HIS_HLVOL_TIMS = 0, .LB_HIS_TEMP_WUP = 66, .LB_HIS_TEMP = 66, .LB_HIS_INTG_CUR = 0, .LB_HIS_DEG_REGI = 0x02, .LB_HIS_CELL_VOL = 0x39, .LB_DTC = 0};
-volatile    Leaf_2011_5C0_message swap_5c0_avg            = {.LB_HIS_DATA_SW = 2, .LB_HIS_HLVOL_TIMS = 0, .LB_HIS_TEMP_WUP = 64, .LB_HIS_TEMP = 64, .LB_HIS_INTG_CUR = 0, .LB_HIS_DEG_REGI = 0x02, .LB_HIS_CELL_VOL = 0x28, .LB_DTC = 0};
-volatile    Leaf_2011_5C0_message swap_5c0_min            = {.LB_HIS_DATA_SW = 3, .LB_HIS_HLVOL_TIMS = 0, .LB_HIS_TEMP_WUP = 64, .LB_HIS_TEMP = 64, .LB_HIS_INTG_CUR = 0, .LB_HIS_DEG_REGI = 0x02, .LB_HIS_CELL_VOL = 0x15, .LB_DTC = 0};
-
-volatile    can_frame_t        saved_5bc_frame                = {.can_id = 0x5BC, .can_dlc = 8};
-
-#if 0
-//battery swap fixes
-static        can_frame_t        ZE1_625_message        = {.can_id = 0x625, .can_dlc = 6, .data = {0x02,0x00,0xff,0x1d,0x20,0x00}}; // Sending 625 removes U215B [HV BATTERY]
-static        can_frame_t        ZE1_5C5_message        = {.can_id = 0x5C5, .can_dlc = 8, .data = {0x40,0x01,0x2F,0x5E,0x00,0x00,0x00,0x00}};// Sending 5C5 Removes U214E [HV BATTERY]
-static        can_frame_t        ZE1_5EC_message        = {.can_id = 0x5EC, .can_dlc = 1, .data = {0x00}};
-static        can_frame_t        ZE1_355_message        = {.can_id = 0x355, .can_dlc = 8, .data = {0x14,0x0a,0x13,0x97,0x10,0x00,0x40,0x00}};
-volatile    uint8_t            ticker40ms            = 0;
-volatile    can_frame_t        ZE1_3B8_message        = {.can_id = 0x3B8, .can_dlc = 5, .data = {0x7F,0xE8,0x01,0x07,0xFF}}; // Sending 3B8 removes U1000 and P318E [HV BATTERY]
-volatile    uint8_t            content_3B8            = 0;
-volatile    uint8_t            flip_3B8            = 0;
-
-static        can_frame_t        swap_605_message    = {.can_id = 0x605, .can_dlc = 1, .data = {0}};
-static        can_frame_t        swap_607_message    = {.can_id = 0x607, .can_dlc = 1, .data = {0}};
-static        can_frame_t        AZE0_45E_message    = {.can_id = 0x45E, .can_dlc = 1, .data = {0x00}};
-static        can_frame_t        AZE0_481_message    = {.can_id = 0x481, .can_dlc = 2, .data = {0x40,0x00}};
-volatile    uint8_t            PRUN_39X            = 0;
-
-static        can_frame_t        AZE0_390_message    = {.can_id = 0x390, .can_dlc = 8, .data = {0x04,0x00,0x00,0x00,0x00,0x80,0x3c,0x07}}; // Sending removes P3196
-static        can_frame_t        AZE0_393_message    = {.can_id = 0x393, .can_dlc = 8, .data = {0x00,0x10,0x00,0x00,0x20,0x00,0x00,0x02}}; // Sending removes P3196
-#endif
 
 static uint16_t primary_battery_current = 0;
 static uint16_t secondary_battery_current = 0;
@@ -254,10 +152,6 @@ void hw_init(void){
 }
 
 void reset_state(){
-    charging_state = 0; //Reset charging state 
-    startup_counter_1DB = 0;
-    startup_counter_39X = 0;
-
 #ifdef DISABLE_REGEN_IN_DRIVE
     current_11A_shifter_state = 0;
     previous_11A_shifter_state = 0;
@@ -312,9 +206,6 @@ ISR(PORTC_INT0_vect){
 
 void can_handler(uint8_t can_bus){
     can_frame_t frame;
-#if 0
-    uint16_t temp2; //Temporary variable used in many functions
- #endif
     uint8_t flag = can_read(MCP_REG_CANINTF, can_bus);
         
     if (flag & (MCP_RX0IF | MCP_RX1IF)){
@@ -327,6 +218,8 @@ void can_handler(uint8_t can_bus){
             can_bit_modify(MCP_REG_CANINTF, MCP_RX0IF, 0x00, can_bus);
         }
 
+#if 1
+        // debug help: messages from batteries get added 100 respective 200 to the CAN id -> forward towards vehicle
         if (can_bus != vehicle_can_bus) {
             uint32_t can_id = frame.can_id;
             if (can_bus == primary_battery_can_bus)
@@ -336,6 +229,7 @@ void can_handler(uint8_t can_bus){
             send_can(vehicle_can_bus, frame);
             frame.can_id = can_id;
         }
+#endif
         
         switch(frame.can_id){
             
@@ -395,6 +289,9 @@ void can_handler(uint8_t can_bus){
                     secondary_battery_current = LB_Current;
                     secondary_battery_lb_relay_cut_request = LB_Relay_Cut_Request;
                     secondary_battery_lb_failsafe_status = LB_Failsafe_status;
+                    // TODO: ignore that flag so far, don't know where it comes from :-/
+                    if (secondary_battery_lb_failsafe_status == 4)
+                        secondary_battery_lb_failsafe_status = 0;
                     secondary_battery_lb_main_relay_on_flag = LB_MainRelayOn_flag;
                     secondary_battery_lb_full_charge_flag = LB_Full_CHARGE_flag;
                     secondary_battery_lb_inter_lock = LB_INTER_LOCK;
@@ -468,607 +365,21 @@ void can_handler(uint8_t can_bus){
             }
             break;
 
+            case 0x55b: {
+                uint16_t LB_IR_Sensor_Wave_Voltage = (frame.data[4] << 2) + ((frame.data[5] & 0xc0) >> 6);
 
-
-
-
-
-
-
-#if 0            
-            case 0x1ED:
-                //this message is only sent by 62kWh packs. We use this info to autodetect battery size
-                My_Battery = MY_BATTERY_62KWH;
-            break;
-            case 0x5B9:
-                send_can(battery_can_bus, AZE0_45E_message); // 500ms
-                send_can(battery_can_bus, AZE0_481_message); // 500ms
-                if (My_Leaf == MY_LEAF_2011)
-                {
-                    frame.can_dlc = 7;
-                    if(charging_state == CHARGING_SLOW)
-                    {
-                        frame.data[5] = 0xFF;
-                    }
-                    else
-                    {
-                        frame.data[5] = 0x4A;
-                    }
-    
-                    frame.data[6] = 0x80;
-                }
-            break;
-            case 0x5EB:
-                //This message is sent by 40/62kWh packs.
-                if (My_Battery == MY_BATTERY_62KWH)
-                {
-                    //Do nothing, we already identified the battery
-                }
-                else
-                {
-                    My_Battery = MY_BATTERY_40KWH;
-                }
-            break;
-            case 0x1DA:
-
-                if( My_Leaf == MY_LEAF_2011 )
-                {
-                    seen_1da = 10; // this variable is used to make the motor controller happy on shutdown
+                // Double the insulation resistance if too low:
+                if (LB_IR_Sensor_Wave_Voltage < 512) {
+                    LB_IR_Sensor_Wave_Voltage *= 2;
                 }
 
-            break;
-            case 0x284: // Hacky way of generating missing inverter message
-
-                // Upon reading VCM originating 0x284 every 20ms, send the missing message(s) to the inverter every 40ms
-                ticker40ms++;
-            
-                if (ticker40ms > 1)
-                {
-                    ticker40ms = 0;
-                    send_can(battery_can_bus, ZE1_355_message); // 40ms
-                }
-
-            break;
-            case 0x1DB:
-                battery_can_bus = can_bus; // Guarantees that messages go to right bus. Without this there is a risk that the messages get sent to VCM instead of HVBAT
-
-                if (frame.data[2] == 0xFF)
-                {
-                    starting_up |= 1;
-                }
-                else
-                {
-                    starting_up &= ~1;
-                }
-            
-                if( My_Leaf == MY_LEAF_2011 )
-                {
-                    // seems like we just need to clear any faults and show permission
-                    if (VCM_WakeUpSleepCommand == 3)
-                    {                                                  // VCM command: wakeup
-                        frame.data[3] = (frame.data[3] & 0xD7) | 0x28; // FRLYON=1, INTERLOCK=1
-                    }
-                    if (startup_counter_1DB >= 100 && startup_counter_1DB <= 300) // Between 1s and 3s after poweron
-                    {
-                        frame.data[3] = (frame.data[3] | 0x10); // Set the full charge flag to ON during startup
-                    }                                              // This is to avoid instrumentation cluster scaling bars incorrectly                    
-                    if(startup_counter_1DB < 1000)
-                    {
-                        startup_counter_1DB++;
-                    }
-                }
-
-                if( My_Leaf == MY_LEAF_2014 )
-                {
-                    //Calculate the SOC% value to send to the dash (Battery sends 10-95% which needs to be rescaled to dash 0-100%)
-                    dash_soc = LB_MIN_SOC + (LB_MAX_SOC - LB_MIN_SOC) * (1.0 * battery_soc_pptt - MINPERCENTAGE) / (MAXPERCENTAGE - MINPERCENTAGE);
-                    if (dash_soc < 0)
-                    { //avoid underflow
-                        dash_soc = 0;
-                    }
-                    if (dash_soc > 1000)
-                    { //avoid overflow
-                        dash_soc = 1000;
-                    }
-                    dash_soc = (dash_soc/10);
-                    frame.data[4] = (uint8_t) dash_soc;  //If this is not written, soc% on dash will say "---"
-                }
-
-                if(max_charge_80_requested)
-                {
-                    if((charging_state == CHARGING_SLOW) && (battery_soc > 80))
-                    {
-                        frame.data[1] = (frame.data[1] & 0xE0) | 2; //request charging stop
-                        frame.data[3] = (frame.data[3] & 0xEF) | 0x10; //full charge completed
-                    }
-                }
+                frame.data[4] = (LB_IR_Sensor_Wave_Voltage & 0x3fc) >> 2;
+                frame.data[5] = ((LB_IR_Sensor_Wave_Voltage & 0x03) << 6) | (frame.data[5] & 0x3f);
 
                 calc_crc8(&frame);
+            }
             break;
-            case 0x50A:
-                if(frame.can_dlc == 6)
-                {    //On ZE0 this message is 6 bytes long
-                    My_Leaf = MY_LEAF_2011;
-                    //We extend the message towards the battery
-                    frame.can_dlc = 8;
-                    frame.data[6] = 0x04;
-                    frame.data[7] = 0x00;
-                }
-                else if(frame.can_dlc == 8)
-                {    //On AZE0 and ZE1, this message is 8 bytes long
-                    My_Leaf = MY_LEAF_2014;
-                }
-                break;
-                case 0x380:
-                if(can_bus == battery_can_bus)
-                {
-                    //message is originating from a 40/62kWh pack when quickcharging
-                }
-                else
-                {
-                    //message is originating from ZE0 OBC (OR ZE1!)
-                    My_Leaf = MY_LEAF_2011;
-                }
-            break;
-#ifdef DISABLE_REGEN_IN_DRIVE
-            case 0x1DC:
-                // This section is used for enabling glide in drive
-                if (disable_regen_toggle && (current_11A_shifter_state == SHIFT_D))
-                {
-                    if (!eco_active)
-                    {
-                        frame.data[1] = (frame.data[1] & 0xC0); // Zero out regen in D
-                        frame.data[2] = (frame.data[2] & 0x0F);
-                    }
-                }
 
-                calc_crc8(&frame);
-            break;
-#endif  /* DISABLE_REGEN_IN_DRIVE */
-            case 0x50B:
-
-                VCM_WakeUpSleepCommand = (frame.data[3] & 0xC0) >> 6;
-                Byte2_50B = frame.data[2];
-            
-                if( My_Leaf == MY_LEAF_2011 )
-                {
-                    CANMASK = (frame.data[2] & 0x04) >> 2;
-                    frame.can_dlc = 7; //Extend the message from 6->7 bytes
-                    frame.data[6] = 0x00;
-                }
-
-                break;
-
-                case 0x50C: // Fetch ALU and send lots of missing 100ms messages towards battery
-
-                ALU_question = frame.data[4];
-                send_can(battery_can_bus, ZE1_625_message); // 100ms
-                send_can(battery_can_bus, ZE1_5C5_message); // 100ms
-                send_can(battery_can_bus, ZE1_3B8_message); // 100ms
-
-                if( My_Leaf == MY_LEAF_2011 ) // ZE0 OBC messages wont satisfy the battery. Send 2013+ PDM messages towards it!
-                {
-
-                    if(startup_counter_39X < 250){
-                        startup_counter_39X++;
-                    }
-                    AZE0_390_message.data[0] = 0x04;
-                    AZE0_390_message.data[3] = 0x00;
-                    AZE0_390_message.data[5] = 0x80;
-                    AZE0_390_message.data[6] = 0x3C;
-                    AZE0_393_message.data[1] = 0x10;
-
-                    if(startup_counter_39X > 13){
-                        AZE0_390_message.data[3] = 0x02;
-                        AZE0_390_message.data[6] = 0x00;
-                        AZE0_393_message.data[1] = 0x20;
-                    }
-                    if(startup_counter_39X > 15){
-                        AZE0_390_message.data[3] = 0x03;
-                        AZE0_390_message.data[6] = 0x00;
-                    }
-                    if((startup_counter_39X > 20) && (Byte2_50B == 0)){ //Shutdown
-                        AZE0_390_message.data[0] = 0x08;
-                        AZE0_390_message.data[3] = 0x01;
-                        AZE0_390_message.data[5] = 0x90;
-                        AZE0_390_message.data[6] = 0x00;
-                        AZE0_393_message.data[1] = 0x70;
-                    }
-
-                    PRUN_39X = (PRUN_39X + 1) % 3;
-                    AZE0_390_message.data[7] = (PRUN_39X << 4);
-                    AZE0_393_message.data[7] = (PRUN_39X << 4);
-                    calc_checksum4(&AZE0_390_message);
-                    calc_checksum4(&AZE0_393_message);
-                    send_can(battery_can_bus, AZE0_390_message); // 100ms
-                    send_can(battery_can_bus, AZE0_393_message); // 100ms
-                }
-
-                content_3B8 = (content_3B8 + 1) % 15;
-                ZE1_3B8_message.data[2] = content_3B8; // 0 - 14 (0x00 - 0x0E)
-
-                if (flip_3B8)
-                {
-                    flip_3B8 = 0;
-                    ZE1_3B8_message.data[1] = 0xC8;
-                }
-                else
-                {
-                    flip_3B8 = 1;
-                    ZE1_3B8_message.data[1] = 0xE8;
-                }
-
-                break;
-
-                case 0x55B:
-
-                if (ALU_question == 0xB2)
-                {
-                    frame.data[2] = 0xAA;
-                }
-                else
-                {
-                    frame.data[2] = 0x55;
-                }
-
-                if( My_Leaf == MY_LEAF_2011 )
-                {
-                    if (CANMASK == 0)
-                    {
-                        frame.data[6] = (frame.data[6] & 0xCF) | 0x20;
-                    }
-                    else
-                    {
-                        frame.data[6] = (frame.data[6] & 0xCF) | 0x10;
-                    }
-                }
-
-                battery_soc_pptt = (uint16_t) ((frame.data[0] << 2) | ((frame.data[1] & 0xC0) >> 6)); //Capture SOC% 0-100.0%
-                battery_soc = (uint8_t) (battery_soc_pptt / 10); // Capture SOC% 0-100
-
-                calc_crc8(&frame);
-
-            break;
-            case 0x5BC:
-                if(frame.data[0] != 0xFF){
-                    starting_up &= ~4;
-                    } else {
-                    starting_up |= 4;
-                }
-                
-                if( My_Leaf == MY_LEAF_2011 )
-                {
-                temp2 = ((frame.data[4] & 0xFE) >> 1); //Collect SOH value
-                if(frame.data[0] != 0xFF){ //Only modify values when GIDS value is available, that means LBC has booted
-                    if((frame.data[5] & 0x10) == 0x00){ //If everything is normal (no output power limit reason)
-                        convert_array_to_5bc(&leaf_40kwh_5bc, (uint8_t *) &frame.data);
-                        swap_5bc_remaining.LB_CAPR = leaf_40kwh_5bc.LB_CAPR;
-                        swap_5bc_full.LB_CAPR = leaf_40kwh_5bc.LB_CAPR;
-                        swap_5bc_remaining.LB_SOH = temp2;
-                        swap_5bc_full.LB_SOH = temp2;
-                        current_capacity_wh = swap_5bc_full.LB_CAPR * 80;
-                        main_battery_temp = frame.data[3] / 20;                    
-                        main_battery_temp = temp_lut[main_battery_temp] + 1;
-                        } else { //Output power limited
-
-                    }
-                
-                    } else {
-                    swap_5bc_remaining.LB_CAPR = 0x3FF;
-                    swap_5bc_full.LB_CAPR = 0x3FF;
-                    swap_5bc_remaining.LB_RCHGTIM = 0;
-                    swap_5bc_remaining.LB_RCHGTCON = 0;
-                }
-                
-                if(startup_counter_1DB < 600) // During the first 6s of bootup, write GIDS to the max value for the pack
-                {
-                    switch (My_Battery)
-                    {
-                        case MY_BATTERY_24KWH:
-                        swap_5bc_remaining.LB_CAPR = 220;
-                        swap_5bc_full.LB_CAPR = 220;
-                        break;
-                        case MY_BATTERY_30KWH:
-                        swap_5bc_remaining.LB_CAPR = 310;
-                        swap_5bc_full.LB_CAPR = 310;
-                        break;
-                        case MY_BATTERY_40KWH:
-                        swap_5bc_remaining.LB_CAPR = 420;
-                        swap_5bc_full.LB_CAPR = 420;
-                        break;
-                        case MY_BATTERY_62KWH:
-                        swap_5bc_remaining.LB_CAPR = 630;
-                        swap_5bc_full.LB_CAPR = 630;
-                        break;
-                    }
-                }
-            
-                skip_5bc--;
-                if(!skip_5bc){
-                    switch(cmr_idx){
-                        case QUICK_CHARGE:
-                        //swap_5bc_remaining.LB_RCHGTIM = 8191; //1FFFh is unavailable value
-                        swap_5bc_full.LB_RCHGTIM = 0x003C; //60 minutes remaining
-                        swap_5bc_full.LB_RCHGTIM = swap_5bc_remaining.LB_RCHGTIM;
-                        swap_5bc_remaining.LB_RCHGTCON = cmr_idx;
-                        swap_5bc_full.LB_RCHGTCON = cmr_idx;
-                        cmr_idx = NORMAL_CHARGE_200V_100;
-                        break;
-                        case NORMAL_CHARGE_200V_100:
-                        swap_5bc_remaining.LB_RCHGTIM = (time_100_with_200V_in_minutes - ((time_100_with_200V_in_minutes * battery_soc)/100));
-                        swap_5bc_full.LB_RCHGTIM = swap_5bc_remaining.LB_RCHGTIM;
-                        swap_5bc_remaining.LB_RCHGTCON = cmr_idx;
-                        swap_5bc_full.LB_RCHGTCON = cmr_idx;
-                        cmr_idx = NORMAL_CHARGE_200V_80;
-                        break;
-                        case NORMAL_CHARGE_200V_80:
-                        if(battery_soc > 80){swap_5bc_remaining.LB_RCHGTIM = 0;}
-                        else{swap_5bc_remaining.LB_RCHGTIM = (time_80_with_200V_in_minutes - ((time_80_with_200V_in_minutes * battery_soc)/100)); }
-                        swap_5bc_full.LB_RCHGTIM = swap_5bc_remaining.LB_RCHGTIM;
-                        swap_5bc_remaining.LB_RCHGTCON = cmr_idx;
-                        swap_5bc_full.LB_RCHGTCON = cmr_idx;
-                        cmr_idx = NORMAL_CHARGE_100V_100;
-                        break;
-                        case NORMAL_CHARGE_100V_100:
-                        swap_5bc_remaining.LB_RCHGTIM = (time_100_with_100V_in_minutes - ((time_100_with_100V_in_minutes * battery_soc)/100));
-                        swap_5bc_full.LB_RCHGTIM = swap_5bc_remaining.LB_RCHGTIM;
-                        swap_5bc_remaining.LB_RCHGTCON = cmr_idx;
-                        swap_5bc_full.LB_RCHGTCON = cmr_idx;
-                        cmr_idx = NORMAL_CHARGE_100V_80;
-                        break;
-                        case NORMAL_CHARGE_100V_80:
-                        if(battery_soc > 80){swap_5bc_remaining.LB_RCHGTIM = 0;}
-                        else{swap_5bc_remaining.LB_RCHGTIM = (time_80_with_100V_in_minutes - ((time_80_with_100V_in_minutes * battery_soc)/100)); }
-                        swap_5bc_full.LB_RCHGTIM = swap_5bc_remaining.LB_RCHGTIM;
-                        swap_5bc_remaining.LB_RCHGTCON = cmr_idx;
-                        swap_5bc_full.LB_RCHGTCON = cmr_idx;
-                        cmr_idx = QUICK_CHARGE;
-                        break;
-                    }
-
-                    swap_5bc_remaining.LB_AVET = main_battery_temp;
-                    swap_5bc_full.LB_AVET = main_battery_temp;
-                    
-                    //ZE0 LEAF just cannot cope with capacities >24kWh
-                    //when quick charging, we change capacity to reflect a proportion of 21.3kWh (266 GIDs)
-                    if( My_Battery != MY_BATTERY_24KWH )
-                    {
-                        if (charging_state == CHARGING_QUICK)
-                        {
-                            temp2 = battery_soc * 300; // e.g. 55 * 300 = 16500
-                            temp2 = temp2 / 100;            // e.g. 16500/100 = 165
-                            swap_5bc_remaining.LB_CAPR = temp2;
-                            swap_5bc_full.LB_CAPR = temp2;
-                        }
-                    }
-                
-                    if(alternate_5bc){
-                        convert_5bc_to_array(&swap_5bc_remaining, (uint8_t *) &saved_5bc_frame.data);
-                        alternate_5bc = 0;
-                    } else {
-                        convert_5bc_to_array(&swap_5bc_full, (uint8_t *) &saved_5bc_frame.data);
-                        alternate_5bc = 1;
-                    }
-                
-                
-                    skip_5bc = 5;
-                    }
-            
-                    frame = saved_5bc_frame;
-                }
-                if( My_Leaf == MY_LEAF_2014 )
-                {
-                //5bc on 2014 looks extremely similar to 2018, except for the extra LB_MaxGIDS switch, so we remove and ignore that
-                if ((frame.data[5] & 0x10) == 0x00)
-                { //LB_MAXGIDS is 0, store actual GIDS remaining to this variable
-                    GIDS = (uint16_t) ((frame.data[0] << 2) | ((frame.data[1] & 0xC0) >> 6));
-                }
-                //Avoid blinking GOM by always writing remaining GIDS
-                frame.data[0] = (uint8_t)(GIDS >> 2);
-                frame.data[1] = (GIDS << 6) & 0xC0;
-                
-                //Collect temperature for 5C0 message
-                main_battery_temp = frame.data[3] / 20;                    // Temperature needed for charger section
-                main_battery_temp = temp_lut[main_battery_temp] + 1;       // write main_battery_temp to be used by 5C0 message
-
-                //Correct charge timer estimates
-                //This code is WIP, currently the 3.3 and 6.6kW times are good, but 100V is messed up somehow. Seems to be differences in LEAF firmware
-                cmr_idx = ((frame.data[5] & 0x03) << 3) | ((frame.data[6] & 0xE0) >> 5);
-                switch(cmr_idx){
-                    case 0: //QC
-                    break;
-                    case 5: //6.6kW 100%
-                        temp2 = (time_100_with_66kW_in_minutes - ((time_100_with_66kW_in_minutes * battery_soc)/100));
-                        frame.data[6] = (frame.data[6] & 0xE0) | (temp2 >> 8);
-                        frame.data[7] = (temp2 & 0xFF);
-                    break;
-                    case 8: //200V 100%
-                        temp2 = (time_100_with_200V_in_minutes - ((time_100_with_200V_in_minutes * battery_soc)/100));
-                        frame.data[6] = (frame.data[6] & 0xE0) | (temp2 >> 8);
-                        frame.data[7] = (temp2 & 0xFF);
-                    break;
-                    case 11: //100V 100%
-                        temp2 = (time_100_with_100V_in_minutes - ((time_100_with_100V_in_minutes * battery_soc)/100));
-                        frame.data[6] = (frame.data[6] & 0xE0) | (temp2 >> 8);
-                        frame.data[7] = (temp2 & 0xFF);
-                    break;
-                    case 18: //6.6kW 80%
-                        if(battery_soc < 80)
-                        {
-                            temp2 = (time_80_with_66kW_in_minutes - ((time_80_with_66kW_in_minutes * (battery_soc+20))/100));
-                            frame.data[6] = (frame.data[6] & 0xE0) | (temp2 >> 8);
-                            frame.data[7] = (temp2 & 0xFF);
-                        }
-                        else
-                        {
-                            temp2 = 0; //0 since we are over 80% SOC
-                            frame.data[6] = (frame.data[6] & 0xE0) | (temp2 >> 8);
-                            frame.data[7] = (temp2 & 0xFF);
-                        }
-                    break;
-                    case 21: //200V 80%
-                        if(battery_soc < 80)
-                        {
-                            temp2 = (time_80_with_200V_in_minutes - ((time_80_with_200V_in_minutes * (battery_soc+20))/100));
-                            frame.data[6] = (frame.data[6] & 0xE0) | (temp2 >> 8);
-                            frame.data[7] = (temp2 & 0xFF);
-                        }
-                        else
-                        {
-                            temp2 = 0; //0 since we are over 80% SOC
-                            frame.data[6] = (frame.data[6] & 0xE0) | (temp2 >> 8);
-                            frame.data[7] = (temp2 & 0xFF);
-                        }
-                    break;
-                    case 24: //100V 80%
-                        if(battery_soc < 80)
-                        {
-                            temp2 = (time_80_with_100V_in_minutes - ((time_80_with_100V_in_minutes * (battery_soc+20))/100));
-                            frame.data[6] = (frame.data[6] & 0xE0) | (temp2 >> 8);
-                            frame.data[7] = (temp2 & 0xFF);
-                        }
-                        else
-                        {
-                            temp2 = 0; //0 since we are over 80% SOC
-                            frame.data[6] = (frame.data[6] & 0xE0) | (temp2 >> 8);
-                            frame.data[7] = (temp2 & 0xFF);
-                        }
-                    break;
-                    case 31: //Unavailable
-                    break;
-                    
-                    }
-                
-                }
-
-#ifdef DISABLE_REGEN_IN_DRIVE
-                uint8_t mux_5bc_CapacityCharge = frame.data[4] & 0x01;
-
-                if (timeToSetCapacityDisplay > 0)
-                {
-                    timeToSetCapacityDisplay--;
-                    if (mux_5bc_CapacityCharge == 1)
-                    {
-                        if( My_Leaf == MY_LEAF_2011 )
-                        {
-                            // 2011 works a bit differently when it comes to visualizing battery saver
-                            frame.data[2] = (uint8_t)((frame.data[2] & 0xF0) | SetCapacityDisplay);
-                        }
-                        if( My_Leaf == MY_LEAF_2014 )
-                        {
-                            frame.data[2] = (uint8_t)((frame.data[2] & 0x0F) | SetCapacityDisplay << 4);
-                        }
-                    }
-                }
-#endif
-
-                break;
-            case 0x5C0: //Send 500ms messages here
-                send_can(battery_can_bus, ZE1_5EC_message);//500ms
-                
-                swap_5c0_max.LB_HIS_TEMP = main_battery_temp;
-                swap_5c0_max.LB_HIS_TEMP_WUP = main_battery_temp;
-                swap_5c0_avg.LB_HIS_TEMP = main_battery_temp;
-                swap_5c0_avg.LB_HIS_TEMP_WUP = main_battery_temp;
-                swap_5c0_min.LB_HIS_TEMP = main_battery_temp;
-                swap_5c0_min.LB_HIS_TEMP_WUP = main_battery_temp;
-                    
-                if(swap_5c0_idx == 0){
-                    convert_5c0_to_array(&swap_5c0_max, (uint8_t *) &frame.data);
-                    } 
-                else if(swap_5c0_idx == 1){
-                    convert_5c0_to_array(&swap_5c0_avg, (uint8_t *) &frame.data);
-                    }
-                else {
-                    convert_5c0_to_array(&swap_5c0_min, (uint8_t *) &frame.data);
-                }
-                    
-                swap_5c0_idx = (swap_5c0_idx + 1) % 3;
-                //This takes advantage of the modulus operator % to reset the value of swap_5c0_idx to 0 once it reaches 3.
-                //It also eliminates the need for an if statement and a conditional check, which improves performance (but sacrifices readability)
-
-                break;
-
-#ifdef DISABLE_REGEN_IN_DRIVE
-           case 0x11A:
-               current_11A_shifter_state = (frame.data[0] & 0xF0);
-
-               eco_active = ((frame.data[1] & 0x10) >> 4);
-
-               if (previous_11A_shifter_state == SHIFT_D)
-               {
-                   // If we go from D to N, toggle the regen disable feature
-                   if (current_11A_shifter_state == SHIFT_N)
-                   {
-                       if (disable_regen_toggle == 0)
-                       {
-                           disable_regen_toggle = 1;
-                           timeToSetCapacityDisplay = FADE_OUT_CAP_AFTER_SETTING_REGEN;
-                           SetCapacityDisplay = 2;
-                       }
-                       else
-                       {
-                           disable_regen_toggle = 0;
-                           timeToSetCapacityDisplay = FADE_OUT_CAP_AFTER_SETTING_REGEN;
-                           SetCapacityDisplay = 4;
-                       }
-                   }
-               }
-
-               previous_11A_shifter_state = (frame.data[0] & 0xF0);
-               break;
-#endif  /* DISABLE_REGEN_IN_DRIVE */
-
-            case 0x1F2:
-                 //Collect charging state
-                charging_state = frame.data[2];
-                //Check if VCM wants to only charge to 80%
-                max_charge_80_requested = ((frame.data[0] & 0x80) >> 7);
- 
-                if( My_Leaf == MY_LEAF_2011 )
-                {
-                    seconds_without_1f2 = 0; // Keep resetting this variable, vehicle is not turned off
-     
-                    if (seen_1da && charging_state == CHARGING_IDLE)
-                    {
-                        frame.data[2] = 0;
-                        seen_1da--;
-                    }
-     
-                    if(( My_Battery == MY_BATTERY_40KWH ) || ( My_Battery == MY_BATTERY_62KWH ) )
-                    {
-                        // Only for 40/62kWh packs retrofitted to ZE0
-                        frame.data[3] = 0xA0;                    // Change from gen1->gen4+ . But doesn't seem to help much. We fix it anyways.
-                        calc_sum2(&frame);
-                    }
-     
-                }
-                break;
-
-                case 0x59E: // QC capacity message, adjust for AZE0 with 30/40/62kWh pack swaps
-
-                if( My_Leaf == MY_LEAF_2014 )
-                {
-                    frame.data[2] = 0x0E; // Set LB_Full_Capacity_for_QC to 23000Wh (default value for 24kWh LEAF)
-                    frame.data[3] = 0x60;
-
-                    // Calculate new LBC_QC_CapRemaining value
-                    temp2 = ((230 * battery_soc) / 100);                       // Crazy advanced math
-                    frame.data[3] = (frame.data[3] & 0xF0) | ((temp2 >> 5) & 0xF);  // store the new LBC_QC_CapRemaining
-                    frame.data[4] = (uint8_t) ((temp2 & 0x1F) << 3) | (frame.data[4] & 0x07); // to the 59E message out to vehicle
-                    calc_crc8(&frame);
-                }
-                break;
-
- 
-                case 0x68C:
-                case 0x603:
-                reset_state(); // Reset all states, vehicle is starting up
-
-                send_can(battery_can_bus, swap_605_message); // Send these ZE1 messages towards battery
-                send_can(battery_can_bus, swap_607_message);
-                break;
-#endif
             default:
             break;
             }
@@ -1080,45 +391,29 @@ void can_handler(uint8_t can_bus){
 #if 0
                 case 0x633:    //new 40kWh message, block to save CPU
                     blocked = 1;
-                    break;
-                case 0x625:    //Block this incase inverter upgrade code sends it towards battery (we generate our own)
-                    blocked = 1;
-                    break;
-                case 0x355:    //Block this incase inverter upgrade code sends it towards battery (we generate our own)
-                    blocked = 1;
-                    break;
-                case 0x5EC:    //Block this incase inverter upgrade code sends it towards battery (we generate our own)
-                    blocked = 1;
-                    break;
-                case 0x5C5:    //Block this incase inverter upgrade code sends it towards battery (we generate our own)
-                    blocked = 1;
-                    break;
-                case 0x3B8:    //Block this incase inverter upgrade code sends it towards battery (we generate our own)
-                    blocked = 1; 
-                    break;
-                case 0x59E: //new AZE0 battery message, block on ZE0 LEAF to save resources
-                    if( My_Leaf == MY_LEAF_2011 )
-                    {
-                        blocked = 1;
-                    }
-                    break;
 #endif
                 default:
                     blocked = 0;
                     break;
             }
             if(!blocked){
+
+                static const int debug_battery = secondary_battery_can_bus;
+
                 switch (can_bus) {
+                    // signals from vehicle are sent to both batteries
                     case vehicle_can_bus:
                         send_can(primary_battery_can_bus, frame);
                         send_can(secondary_battery_can_bus, frame);
                         break;
+                    // signals from primary battery are sent to vehicle, but not poll answers!
                     case primary_battery_can_bus:
-                        if (frame.can_id != 0x7bb)
+                        if (frame.can_id != 0x7bb || debug_battery == primary_battery_can_bus)
                             send_can(vehicle_can_bus, frame);
                         break;
+                    // only poll answers are forwarded from secondary battery to vehicle
                     case secondary_battery_can_bus:
-                        if (frame.can_id == 0x7bb)
+                        if (frame.can_id == 0x7bb && debug_battery == secondary_battery_can_bus)
                             send_can(vehicle_can_bus, frame);
                         break;
                     default:
