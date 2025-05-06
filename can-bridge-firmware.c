@@ -27,6 +27,8 @@ volatile    uint16_t    sec_timer            = 1;    //actually the same as ms_t
 
 static uint16_t primary_battery_current = 0;
 static uint16_t secondary_battery_current = 0;
+static uint8_t primary_battery_lb_soc = 255;
+static uint8_t secondary_battery_lb_soc = 255;
 static uint8_t primary_battery_lb_relay_cut_request = 0;
 static uint8_t secondary_battery_lb_relay_cut_request = 0;
 static uint8_t primary_battery_lb_failsafe_status = 0;
@@ -39,6 +41,8 @@ static uint8_t primary_battery_lb_inter_lock = 0;
 static uint8_t secondary_battery_lb_inter_lock = 1;
 static uint8_t primary_battery_lb_discharge_power_status = 0;
 static uint8_t secondary_battery_lb_discharge_power_status = 0;
+static uint16_t primary_battery_lb_ir_sensor_wave_voltage = 0;
+static uint16_t secondary_battery_lb_ir_sensor_wave_voltage = 0;
 
 static uint16_t primary_battery_discharge_power_limit = 0;
 static uint16_t secondary_battery_discharge_power_limit = 1023;
@@ -54,11 +58,24 @@ static uint16_t secondary_battery_gids = 502;
 static uint16_t primary_battery_max_gids = 0;
 static uint16_t secondary_battery_max_gids = 502;
 
+#if 0
 static uint16_t primary_battery_lb_full_capacity_for_qc = 0;
 static uint16_t secondary_battery_lb_full_capacity_for_qc = 0;
 static uint16_t primary_battery_lb_remain_capacity_for_qc = 0;
 static uint16_t secondary_battery_lb_remain_capacity_for_qc = 0;
+#endif
 
+static uint16_t battery_lb_total_voltage = 0;
+static uint16_t battery_max_power_for_charger = 0;
+
+#define DISABLE_REGEN_IN_DRIVE
+
+#ifdef DISABLE_REGEN_IN_DRIVE
+static volatile uint8_t current_11A_shifter_state = 0;
+static volatile uint8_t previous_11A_shifter_state = 0;
+static volatile uint8_t disable_regen_toggle;
+static volatile uint8_t eco_active = 0;
+#endif
 
 void hw_init(void){
     uint8_t caninit;
@@ -252,11 +269,53 @@ void can_handler(uint8_t can_bus){
                     secondary_battery_charge_power_status = LB_Charge_Power_Status;
                 }
 
+                // increase charging speed, we have two batteries after all...
+                if (primary_battery_max_power_for_charger != 1023 && secondary_battery_max_power_for_charger != 1023 && battery_lb_total_voltage != 0 && primary_battery_current < 1024 && secondary_battery_current < 1024) {
+                    uint16_t combined_max_power_for_charger = (primary_battery_max_power_for_charger + secondary_battery_max_power_for_charger) - 100;
+                    int32_t max_power_bat0_watt = primary_battery_max_power_for_charger * 100 - 10000;
+                    int32_t max_power_bat1_watt = secondary_battery_max_power_for_charger * 100 - 10000;
+                    double max_power_bat0_amp = max_power_bat0_watt / (battery_lb_total_voltage * 0.5);
+                    double max_power_bat1_amp = max_power_bat1_watt / (battery_lb_total_voltage * 0.5);
+                    double bat0_amp = primary_battery_current / 2.0;
+                    double bat1_amp = secondary_battery_current / 2.0;
+
+                    // Begin with the fail-safe version: Minimum of both charger powers is it
+                    if (battery_max_power_for_charger == 0) {
+                        battery_max_power_for_charger = MIN(primary_battery_max_power_for_charger, secondary_battery_max_power_for_charger);
+                    }
+
+                    // only change the max charging speed every 250ms with 100W, almost as Leaf batteries do
+                    static int counter = 0;
+                    if ((counter++ % 25) == 0) {
+                        // If both batteries have amperage below 80% of desired maximum, slowly raise the power by 100W
+                        if (bat0_amp < max_power_bat0_amp * 0.8 && bat1_amp < max_power_bat1_amp * 0.8) {
+                            battery_max_power_for_charger = MIN(MIN(1000, combined_max_power_for_charger), battery_max_power_for_charger + 1);
+                        }
+                        // If one of the batteries is above 90% of desired maximum, begin to lower by 100W
+                        else if (bat0_amp > max_power_bat0_amp * 0.9 || bat1_amp > max_power_bat1_amp * 0.9) {
+                            battery_max_power_for_charger = MAX(MIN(primary_battery_max_power_for_charger, secondary_battery_max_power_for_charger), battery_max_power_for_charger - 1);
+                            // As long as both are below: Stick to exactly that value!
+                            if (bat0_amp < max_power_bat0_amp && bat1_amp < max_power_bat1_amp) {
+                                battery_max_power_for_charger = (((bat0_amp + bat1_amp) * battery_lb_total_voltage * 0.5) + 1) / 100;
+                            }
+                        }
+                    }
+                    LB_MAX_POWER_FOR_CHARGER = battery_max_power_for_charger;
+                } else {
+                    battery_max_power_for_charger = 0;
+                    LB_MAX_POWER_FOR_CHARGER = MIN(primary_battery_max_power_for_charger, secondary_battery_max_power_for_charger);
+                }
+
                 // Now set the minimum for each max power rating
                 LB_Discharge_Power_Limit = MIN(primary_battery_discharge_power_limit, secondary_battery_discharge_power_limit);
                 LB_Charge_Power_Limit = MIN(primary_battery_charge_power_limit, secondary_battery_charge_power_limit);
-                LB_MAX_POWER_FOR_CHARGER = MIN(primary_battery_max_power_for_charger, secondary_battery_max_power_for_charger);
                 LB_Charge_Power_Status = primary_battery_charge_power_status | secondary_battery_charge_power_status;
+
+#ifdef DISABLE_REGEN_IN_DRIVE
+                if (disable_regen_toggle && (current_11A_shifter_state == SHIFT_D) && !eco_active) {
+                    LB_Charge_Power_Limit = 0;
+                }
+#endif
 
                 frame.data[0] = LB_Discharge_Power_Limit >> 2;
                 frame.data[1] = ((LB_Discharge_Power_Limit & 0x03) << 6) | (LB_Charge_Power_Limit >> 4);
@@ -268,6 +327,7 @@ void can_handler(uint8_t can_bus){
 
             case 0x1db: {
                 uint16_t LB_Current = (frame.data[0] << 3) | ((frame.data[1] & 0xe0) >> 5);
+                uint8_t LB_Usable_SOC = (frame.data[4] & 0x7f);
 
                 uint8_t LB_Relay_Cut_Request = (frame.data[1] & 0x18) >> 3;
                 uint8_t LB_Failsafe_status = (frame.data[1] & 0x07);
@@ -275,18 +335,22 @@ void can_handler(uint8_t can_bus){
                 uint8_t LB_Full_CHARGE_flag = (frame.data[3] & 0x10) >> 4;
                 uint8_t LB_INTER_LOCK = (frame.data[3] & 0x08) >> 3;
                 uint8_t LB_Discharge_Power_Status = (frame.data[3] & 0x06) >> 1;
+                uint16_t LB_Total_Voltage = (frame.data[2] << 2) | ((frame.data[3] & 0xc0) >> 6);
 
                 if (can_bus == primary_battery_can_bus) {
                     primary_battery_current = LB_Current;
+                    primary_battery_lb_soc = LB_Usable_SOC;
                     primary_battery_lb_relay_cut_request = LB_Relay_Cut_Request;
                     primary_battery_lb_failsafe_status = LB_Failsafe_status;
                     primary_battery_lb_main_relay_on_flag = LB_MainRelayOn_flag;
                     primary_battery_lb_full_charge_flag = LB_Full_CHARGE_flag;
                     primary_battery_lb_inter_lock = LB_INTER_LOCK;
                     primary_battery_lb_discharge_power_status = LB_Discharge_Power_Status;
+                    battery_lb_total_voltage = LB_Total_Voltage;
                 }
                 else if (can_bus == secondary_battery_can_bus) {
                     secondary_battery_current = LB_Current;
+                    secondary_battery_lb_soc = LB_Usable_SOC;
                     secondary_battery_lb_relay_cut_request = LB_Relay_Cut_Request;
                     secondary_battery_lb_failsafe_status = LB_Failsafe_status;
                     // TODO: ignore that flag so far, don't know where it comes from :-/
@@ -301,6 +365,13 @@ void can_handler(uint8_t can_bus){
                 // Add the current
                 LB_Current = primary_battery_current + secondary_battery_current;
 
+                // SOC is calculated as weighted average
+                if (primary_battery_lb_soc != 255 && secondary_battery_lb_soc != 255) {
+		     // average as [0.0-1.0]
+                    float average_soc = (primary_battery_lb_soc + secondary_battery_lb_soc) / 200.0;
+                    LB_Usable_SOC = MAX(primary_battery_lb_soc, secondary_battery_lb_soc) * average_soc + MIN(primary_battery_lb_soc, secondary_battery_lb_soc) * (1.0 - average_soc) + 0.5;
+                }
+
                 // and merge the flags
                 LB_Relay_Cut_Request = primary_battery_lb_relay_cut_request | secondary_battery_lb_relay_cut_request;
                 LB_Failsafe_status = primary_battery_lb_failsafe_status | secondary_battery_lb_failsafe_status;
@@ -313,6 +384,7 @@ void can_handler(uint8_t can_bus){
                 frame.data[0] = (LB_Current & 0x7f8) >> 3;
                 frame.data[1] = ((LB_Current & 0x07) << 5) | (LB_Relay_Cut_Request << 3) | LB_Failsafe_status;
                 frame.data[3] = (frame.data[3] & 0xc1) | (LB_MainRelayOn_flag << 5) | (LB_Full_CHARGE_flag << 4) | (LB_INTER_LOCK << 3) | (LB_Discharge_Power_Status << 1);
+                frame.data[4] = (frame.data[4] & 0x80) | LB_Usable_SOC;
                 calc_crc8(&frame);
             }
             break;
@@ -341,6 +413,7 @@ void can_handler(uint8_t can_bus){
             }
             break;
 
+#if 0
             case 0x59e: {
                 uint16_t LB_Full_Capacity_for_QC = ((frame.data[2] & 0x1f) << 4) + ((frame.data[3] & 0xf0) >> 4);
                 uint16_t LB_Remain_Capacity_for_QC = ((frame.data[3] & 0x0f) << 5) + ((frame.data[4] & 0xf8) >> 3);
@@ -356,7 +429,7 @@ void can_handler(uint8_t can_bus){
 
                 // Now add the capacity values
                 LB_Full_Capacity_for_QC = primary_battery_lb_full_capacity_for_qc + secondary_battery_lb_full_capacity_for_qc;
-                LB_Remain_Capacity_for_QC = secondary_battery_lb_remain_capacity_for_qc + secondary_battery_lb_remain_capacity_for_qc;
+                LB_Remain_Capacity_for_QC = primary_battery_lb_remain_capacity_for_qc + secondary_battery_lb_remain_capacity_for_qc;
 
                 frame.data[2] = (frame.data[2] & 0xe0) | ((LB_Full_Capacity_for_QC & 0x1f0) >> 4);
                 frame.data[3] = ((LB_Full_Capacity_for_QC & 0x00f) << 4) | ((LB_Remain_Capacity_for_QC & 0x1e0) >> 5);
@@ -364,13 +437,28 @@ void can_handler(uint8_t can_bus){
                 calc_crc8(&frame);
             }
             break;
+#endif
 
             case 0x55b: {
                 uint16_t LB_IR_Sensor_Wave_Voltage = (frame.data[4] << 2) + ((frame.data[5] & 0xc0) >> 6);
 
+                if (can_bus == primary_battery_can_bus) {
+                    primary_battery_lb_ir_sensor_wave_voltage = LB_IR_Sensor_Wave_Voltage;
+                }
+                else if (can_bus == secondary_battery_can_bus) {
+                    secondary_battery_lb_ir_sensor_wave_voltage = LB_IR_Sensor_Wave_Voltage;
+                }
+
+                if (primary_battery_lb_ir_sensor_wave_voltage != 0 && secondary_battery_lb_ir_sensor_wave_voltage != 0) {
+                    LB_IR_Sensor_Wave_Voltage = MAX(primary_battery_lb_ir_sensor_wave_voltage, secondary_battery_lb_ir_sensor_wave_voltage);
+                }
+
                 // Double the insulation resistance if too low:
                 if (LB_IR_Sensor_Wave_Voltage < 512) {
                     LB_IR_Sensor_Wave_Voltage *= 2;
+                }
+                else if (LB_IR_Sensor_Wave_Voltage < 640) {
+                    LB_IR_Sensor_Wave_Voltage *= 1.5;
                 }
 
                 frame.data[4] = (LB_IR_Sensor_Wave_Voltage & 0x3fc) >> 2;
@@ -379,6 +467,41 @@ void can_handler(uint8_t can_bus){
                 calc_crc8(&frame);
             }
             break;
+
+#ifdef DISABLE_REGEN_IN_DRIVE
+            case 0x11a: {
+                current_11A_shifter_state = frame.data[0] & 0xf0;
+                eco_active = (frame.data[1] & 0x10) >> 4;
+
+                if (previous_11A_shifter_state == SHIFT_D) {
+                    // If we go from D to N, toggle the regen disable feature
+                    if (current_11A_shifter_state == SHIFT_N) {
+                        if (disable_regen_toggle == 0) {
+                            disable_regen_toggle = 1;
+                            //timeToSetCapacityDisplay = FADE_OUT_CAP_AFTER_SETTING_REGEN;
+                            //SetCapacityDisplay = 2;
+                        }
+                       else {
+                            disable_regen_toggle = 0;
+                            //timeToSetCapacityDisplay = FADE_OUT_CAP_AFTER_SETTING_REGEN;
+                            //SetCapacityDisplay = 4;
+                        }
+                    }
+                }
+
+                previous_11A_shifter_state =current_11A_shifter_state;
+            }
+            break;
+#endif
+
+#if 0
+            case 0x390: {
+                uint8_t OBC_Flag_QC_IR_Sensor = (frame.data[5] & 0x80) >> 7;
+                OBC_Flag_QC_IR_Sensor = 0;
+                frame.data[5] = (OBC_Flag_QC_IR_Sensor << 7) | (frame.data[5] & 0x7f);
+            }
+            break;
+#endif
 
             default:
             break;
